@@ -45,11 +45,6 @@ jobs:
           Copy-Item -Recurse $tess "dist\PDF2Excel\tesseract"
           Compress-Archive -Path "dist\PDF2Excel\*" -DestinationPath PDF2Excel.zip
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: PDF2Excel-windows
-          path: PDF2Excel.zip
-
       - name: Publish release
         shell: bash
         env:
