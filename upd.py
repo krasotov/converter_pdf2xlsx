@@ -158,10 +158,52 @@ def _column(words: list[dict], bounds: dict[str, tuple[float, float]], key: str)
     return _join_cell([w for w in words if left <= w["cx"] < right])
 
 
+def _row_from_block(block: list[list[dict]], layout: dict, rows: list[UpdRow]) -> UpdRow:
+    bounds = layout["bounds"]
+    pos = layout["pos"]
+    words = [word for line in block for word in line]
+    first = block[0]
+    number = next(
+        (
+            int(w["t"])
+            for w in first
+            if w["t"].isdigit() and abs(w["cx"] - pos.get("1", 0.11)) < 0.03
+        ),
+        len(rows) + 1,
+    )
+    name = _join_cell(
+        [
+            w
+            for w in words
+            if layout["name_left"] <= w["cx"] < layout["name_right"]
+            and not re.fullmatch(r"[-—–]+", w["t"])
+        ]
+    )
+    return UpdRow(
+        n=number,
+        code=_column(first, bounds, "А"),
+        name=re.sub(r"\s+", " ", re.sub(r"-\s+", "-", name)).strip(),
+        unit_code=_column(words, bounds, "2"),
+        unit=_column(words, bounds, "2а"),
+        qty=_money(_column(words, bounds, "3")),
+        price=_money(_column(words, bounds, "4")),
+        sum_wo=_money(_column(words, bounds, "5")),
+        excise=_column(words, bounds, "6") or "без акциза",
+        rate=_column(words, bounds, "7"),
+        vat=_money(_column(words, bounds, "8")),
+        sum_w=_money(_column(words, bounds, "9")),
+        country_code=_column(words, bounds, "10"),
+        country=_column(words, bounds, "10а"),
+        gtd=_column(words, bounds, "11"),
+    )
+
+
 def parse_upd(doc: pymupdf.Document) -> Result:
     rows: list[UpdRow] = []
     meta = {"no": "", "date": "", "seller": "", "buyer": "", "seller_inn": "", "buyer_inn": ""}
     stated_wo = stated_vat = stated_w = None
+    layout: dict | None = None
+    pending: list[list[dict]] | None = None
     for page in doc:
         text = page.get_text("text")
         page_meta = _meta(text)
@@ -178,61 +220,41 @@ def parse_upd(doc: pymupdf.Document) -> Result:
             ),
             None,
         )
-        if start is None or end is None or end <= start:
+        if start is not None:
+            pos = _header_pos(lines[start])
+            layout = {
+                "pos": pos,
+                "bounds": _bounds(pos),
+                "name_right": (pos.get("1б", 0.30) + pos.get("2", 0.33)) / 2,
+                "name_left": pos.get("1", 0.1) + 0.012,
+            }
+            data_from = start + 1
+        elif layout is None:
             continue
-        pos = _header_pos(lines[start])
-        bounds = _bounds(pos)
-        name_right = (pos.get("1б", 0.30) + pos.get("2", 0.33)) / 2
-        name_left = pos.get("1", 0.1) + 0.012
-        total_words = lines[end]
-        stated_wo = _money(_column(total_words, bounds, "5")) or stated_wo
-        stated_vat = _money(_column(total_words, bounds, "8")) or stated_vat
-        stated_w = _money(_column(total_words, bounds, "9")) or stated_w
-
-        blocks: list[list[list[dict]]] = []
-        code_right = bounds.get("А", (0.0, 0.1))[1]
-        for line in lines[start + 1 : end]:
+        else:
+            data_from = 0
+        data_to = end if end is not None else len(lines)
+        if data_to <= data_from:
+            continue
+        code_right = layout["bounds"].get("А", (0.0, 0.1))[1]
+        for line in lines[data_from:data_to]:
             if any(_is_code(w["t"]) and w["cx"] < code_right for w in line):
-                blocks.append([line])
-            elif blocks:
-                blocks[-1].append(line)
-        for block in blocks:
-            words = [word for line in block for word in line]
-            first = block[0]
-            number = next(
-                (
-                    int(w["t"])
-                    for w in first
-                    if w["t"].isdigit() and abs(w["cx"] - pos.get("1", 0.11)) < 0.03
-                ),
-                len(rows) + 1,
-            )
-            name = _join_cell(
-                [
-                    w
-                    for w in words
-                    if name_left <= w["cx"] < name_right and not re.fullmatch(r"[-—–]+", w["t"])
-                ]
-            )
-            rows.append(
-                UpdRow(
-                    n=number,
-                    code=_column(first, bounds, "А"),
-                    name=re.sub(r"\s+", " ", name).strip(),
-                    unit_code=_column(words, bounds, "2"),
-                    unit=_column(words, bounds, "2а"),
-                    qty=_money(_column(words, bounds, "3")),
-                    price=_money(_column(words, bounds, "4")),
-                    sum_wo=_money(_column(words, bounds, "5")),
-                    excise=_column(words, bounds, "6") or "без акциза",
-                    rate=_column(words, bounds, "7"),
-                    vat=_money(_column(words, bounds, "8")),
-                    sum_w=_money(_column(words, bounds, "9")),
-                    country_code=_column(words, bounds, "10"),
-                    country=_column(words, bounds, "10а"),
-                    gtd=_column(words, bounds, "11"),
-                )
-            )
+                if pending:
+                    rows.append(_row_from_block(pending, layout, rows))
+                pending = [line]
+            elif pending is not None:
+                pending.append(line)
+        if end is not None:
+            if pending:
+                rows.append(_row_from_block(pending, layout, rows))
+                pending = None
+            total_words = lines[end]
+            bounds = layout["bounds"]
+            stated_wo = _money(_column(total_words, bounds, "5")) or stated_wo
+            stated_vat = _money(_column(total_words, bounds, "8")) or stated_vat
+            stated_w = _money(_column(total_words, bounds, "9")) or stated_w
+    if pending and layout is not None:
+        rows.append(_row_from_block(pending, layout, rows))
     items = [
         Item(row.n, row.code, row.name, row.qty, row.unit, row.price, row.sum_w)
         for row in rows
