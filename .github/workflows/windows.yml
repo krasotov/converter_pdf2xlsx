@@ -1,0 +1,59 @@
+name: Windows exe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Install Tesseract and Russian language data
+        shell: pwsh
+        run: |
+          choco install tesseract -y
+          $exe = Get-ChildItem -Path "C:\Program Files","C:\Program Files (x86)","C:\ProgramData\chocolatey" -Filter tesseract.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "tesseract.exe not found" }
+          $tess = $exe.DirectoryName
+          New-Item -ItemType Directory -Force -Path "$tess\tessdata" | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata/raw/main/rus.traineddata" -OutFile "$tess\tessdata\rus.traineddata"
+          if (-not (Test-Path "$tess\tessdata\eng.traineddata")) {
+            Invoke-WebRequest -Uri "https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata" -OutFile "$tess\tessdata\eng.traineddata"
+          }
+          Set-Content -Path tesspath.txt -Value $tess -Encoding ascii
+
+      - name: Build exe
+        run: pyinstaller --noconfirm --windowed --name PDF2Excel --hidden-import upd --collect-submodules pymupdf app.py
+
+      - name: Bundle Tesseract next to the exe
+        shell: pwsh
+        run: |
+          $tess = (Get-Content tesspath.txt -Raw).Trim()
+          Copy-Item -Recurse $tess "dist\PDF2Excel\tesseract"
+          Compress-Archive -Path "dist\PDF2Excel\*" -DestinationPath PDF2Excel.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDF2Excel-windows
+          path: PDF2Excel.zip
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view v1.0.0 || gh release create v1.0.0 --title "Windows" --notes "PDF2Excel для Windows. Распакуйте архив и запустите PDF2Excel.exe."
+          gh release upload v1.0.0 PDF2Excel.zip --clobber
