@@ -63,45 +63,99 @@ def _lines(words: list[dict]) -> list[list[dict]]:
     return lines
 
 
-def _cell(words: list[dict], x0: float, x1: float) -> str:
-    picked = [w for w in words if x0 <= w["cx"] < x1]
-    picked.sort(key=lambda w: w["x"])
-    texts = [w["t"] for w in picked]
-    if (
-        len(texts) >= 2
-        and re.fullmatch(r"\d{1,3}", texts[0])
-        and re.fullmatch(r"\d{3}[.,]\d{2}", texts[1])
-    ):
-        return texts[0] + texts[1]
-    return " ".join(texts).strip()
-
-
 def _money(text: str) -> Decimal | None:
     if not text or text in {"-", "—", "Х", "X"}:
         return None
     return parse_number(text.replace(" ", ""))
 
 
+_HEADERS = ["А", "1", "1а", "1б", "2", "2а", "3", "4", "5", "6", "7", "8", "9", "10", "10а", "11"]
+
+
 def _meta(text: str) -> dict[str, str]:
     flat = re.sub(r"[ \t]+", " ", text)
     meta = {"no": "", "date": "", "seller": "", "buyer": "", "seller_inn": "", "buyer_inn": ""}
-    m = re.search(r"Сч[её]т-фактура №\s*(\S+)\s+от\s+(\d{1,2}\s+\S+\s+\d{4})", flat, re.I)
+    m = re.search(r"Сч[её]т-фактура №:?\s*(\S+)\s+от\s+(\d{1,2}\s+\S+\s+\d{4})", flat, re.I)
     if m:
         meta["no"] = m.group(1)
         meta["date"] = re.sub(r"\s+", " ", m.group(2)).strip()
-    m = re.search(r"Продавец\s+(.+?)\s+\(2\)", flat)
+    m = re.search(r"Продавец:?\s+(.+?)\s+\(2\)", flat)
     if m:
-        meta["seller"] = m.group(1).strip()
-    m = re.search(r"Покупатель\s+(.+?)\s+\(6\)", flat)
+        meta["seller"] = m.group(1).strip(" :")
+    m = re.search(r"Покупатель:?\s+(.+?)\s+\(6\)", flat)
     if m:
-        meta["buyer"] = m.group(1).strip()
-    m = re.search(r"ИНН/КПП продавца\s+(\S+)", flat)
+        meta["buyer"] = m.group(1).strip(" :")
+    m = re.search(r"ИНН/КПП продавца:?\s+(\S+)", flat)
     if m:
         meta["seller_inn"] = m.group(1)
-    m = re.search(r"ИНН/КПП покупателя\s+(\S+)", flat)
+    m = re.search(r"ИНН/КПП покупателя:?\s+(\S+)", flat)
     if m:
         meta["buyer_inn"] = m.group(1)
     return meta
+
+
+def _is_code(text: str) -> bool:
+    token = text.strip()
+    if len(token) < 4 or not re.search(r"\d", token):
+        return False
+    return re.fullmatch(r"[\dA-Za-zА-Яа-яЁё][\w./-]{3,}", token) is not None
+
+
+def _index_line(lines: list[list[dict]]) -> int | None:
+    for i, line in enumerate(lines):
+        tokens = {w["t"] for w in line}
+        if {"1а", "2а", "11"} <= tokens:
+            return i
+    return None
+
+
+def _header_pos(line: list[dict]) -> dict[str, float]:
+    pos: dict[str, float] = {}
+    for word in line:
+        token = "А" if word["t"] == "A" else word["t"]
+        if token in _HEADERS and token not in pos:
+            pos[token] = word["cx"]
+    return pos
+
+
+def _bounds(pos: dict[str, float]) -> dict[str, tuple[float, float]]:
+    keys = [key for key in _HEADERS if key in pos]
+    bounds: dict[str, tuple[float, float]] = {}
+    for i, key in enumerate(keys):
+        left = 0.0 if i == 0 else (pos[keys[i - 1]] + pos[key]) / 2
+        right = 1.0 if i + 1 == len(keys) else (pos[key] + pos[keys[i + 1]]) / 2
+        bounds[key] = (left, right)
+    return bounds
+
+
+def _join_cell(words: list[dict]) -> str:
+    ordered = sorted(words, key=lambda w: (w["y"], w["x"]))
+    texts = [w["t"] for w in ordered]
+    parts: list[str] = []
+    i = 0
+    while i < len(texts):
+        if (
+            i + 1 < len(texts)
+            and re.fullmatch(r"\d{1,3}", texts[i])
+            and re.fullmatch(r"\d{3}[.,]\d{2}", texts[i + 1])
+        ):
+            parts.append(texts[i] + texts[i + 1])
+            i += 2
+        else:
+            parts.append(texts[i])
+            i += 1
+    text = " ".join(parts).strip()
+    bits = text.split()
+    if bits and all(re.fullmatch(r"[-—–]+", bit) for bit in bits):
+        return "--"
+    return text
+
+
+def _column(words: list[dict], bounds: dict[str, tuple[float, float]], key: str) -> str:
+    if key not in bounds:
+        return ""
+    left, right = bounds[key]
+    return _join_cell([w for w in words if left <= w["cx"] < right])
 
 
 def parse_upd(doc: pymupdf.Document) -> Result:
@@ -115,50 +169,68 @@ def parse_upd(doc: pymupdf.Document) -> Result:
             if value and not meta.get(key):
                 meta[key] = value
         lines = _lines(_words(page))
-        start = next((i for i, line in enumerate(lines) if any(w["t"] == "1а" for w in line)), None)
+        start = _index_line(lines)
         end = next(
-            (i for i, line in enumerate(lines) if any(w["t"] == "Всего" for w in line) and any(w["t"] == "оплате" for w in line)),
+            (
+                i
+                for i, line in enumerate(lines)
+                if any(w["t"] == "Всего" for w in line) and any(w["t"] == "оплате" for w in line)
+            ),
             None,
         )
         if start is None or end is None or end <= start:
             continue
-        total_line = lines[end]
-        stated_wo = _money(_cell(total_line, 0.50, 0.58)) or stated_wo
-        stated_vat = _money(_cell(total_line, 0.64, 0.73)) or stated_vat
-        stated_w = _money(_cell(total_line, 0.73, 0.82)) or stated_w
+        pos = _header_pos(lines[start])
+        bounds = _bounds(pos)
+        name_right = (pos.get("1б", 0.30) + pos.get("2", 0.33)) / 2
+        name_left = pos.get("1", 0.1) + 0.012
+        total_words = lines[end]
+        stated_wo = _money(_column(total_words, bounds, "5")) or stated_wo
+        stated_vat = _money(_column(total_words, bounds, "8")) or stated_vat
+        stated_w = _money(_column(total_words, bounds, "9")) or stated_w
 
         blocks: list[list[list[dict]]] = []
+        code_right = bounds.get("А", (0.0, 0.1))[1]
         for line in lines[start + 1 : end]:
-            if any(re.fullmatch(r"\d{5,}", w["t"]) and w["cx"] < 0.09 for w in line):
+            if any(_is_code(w["t"]) and w["cx"] < code_right for w in line):
                 blocks.append([line])
             elif blocks:
                 blocks[-1].append(line)
         for block in blocks:
+            words = [word for line in block for word in line]
             first = block[0]
-            name_bits = []
-            for line in block:
-                piece = _cell(line, 0.115, 0.30)
-                if piece:
-                    name_bits.append(piece)
-            n_text = _cell(first, 0.09, 0.115)
-            n = int(n_text) if n_text.isdigit() else len(rows) + 1
+            number = next(
+                (
+                    int(w["t"])
+                    for w in first
+                    if w["t"].isdigit() and abs(w["cx"] - pos.get("1", 0.11)) < 0.03
+                ),
+                len(rows) + 1,
+            )
+            name = _join_cell(
+                [
+                    w
+                    for w in words
+                    if name_left <= w["cx"] < name_right and not re.fullmatch(r"[-—–]+", w["t"])
+                ]
+            )
             rows.append(
                 UpdRow(
-                    n=n,
-                    code=_cell(first, 0.0, 0.09),
-                    name=re.sub(r"\s+", " ", " ".join(name_bits)).strip(),
-                    unit_code=_cell(first, 0.31, 0.355),
-                    unit=_cell(first, 0.355, 0.42),
-                    qty=_money(_cell(first, 0.42, 0.46)),
-                    price=_money(_cell(first, 0.46, 0.52)),
-                    sum_wo=_money(_cell(first, 0.52, 0.568)),
-                    excise=_cell(first, 0.568, 0.618) or "без акциза",
-                    rate=_cell(first, 0.615, 0.66),
-                    vat=_money(_cell(first, 0.66, 0.73)),
-                    sum_w=_money(_cell(first, 0.73, 0.80)),
-                    country_code=_cell(first, 0.80, 0.84),
-                    country=_cell(first, 0.84, 0.90),
-                    gtd=_cell(first, 0.90, 1.0),
+                    n=number,
+                    code=_column(first, bounds, "А"),
+                    name=re.sub(r"\s+", " ", name).strip(),
+                    unit_code=_column(words, bounds, "2"),
+                    unit=_column(words, bounds, "2а"),
+                    qty=_money(_column(words, bounds, "3")),
+                    price=_money(_column(words, bounds, "4")),
+                    sum_wo=_money(_column(words, bounds, "5")),
+                    excise=_column(words, bounds, "6") or "без акциза",
+                    rate=_column(words, bounds, "7"),
+                    vat=_money(_column(words, bounds, "8")),
+                    sum_w=_money(_column(words, bounds, "9")),
+                    country_code=_column(words, bounds, "10"),
+                    country=_column(words, bounds, "10а"),
+                    gtd=_column(words, bounds, "11"),
                 )
             )
     items = [
@@ -183,7 +255,9 @@ def parse_upd(doc: pymupdf.Document) -> Result:
     result.kind = "upd"
     result.upd_rows = rows
     result.stated_wo = stated_wo
-    if stated_w is not None and abs(result.total - stated_w) > Decimal("0.05"):
+    if not rows:
+        result.warnings.append("Позиции не распознаны.")
+    elif stated_w is not None and abs(result.total - stated_w) > Decimal("0.05"):
         result.warnings.append(
             f"Сумма строк {result.total} отличается от итога документа {stated_w}."
         )
