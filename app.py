@@ -37,8 +37,18 @@ def _clickable(parent: tk.Misc, text: str, command, bg: str, fg: str, font: tupl
     return label
 
 
+def _output_path(folder: Path, stem: str, used: set[Path]) -> Path:
+    path = folder / f"Номенклатура_{stem}.xlsx"
+    number = 2
+    while path in used:
+        path = folder / f"Номенклатура_{stem}_{number}.xlsx"
+        number += 1
+    used.add(path)
+    return path
+
+
 class App(tk.Tk):
-    def __init__(self, initial: str | None = None) -> None:
+    def __init__(self, initial: list[str] | None = None) -> None:
         super().__init__()
         self.title("PDF → Excel")
         self.geometry("580x460")
@@ -76,7 +86,7 @@ class App(tk.Tk):
         ).pack(side="left")
         tk.Label(
             wrap,
-            text="Выберите PDF. Программа перенесёт номенклатуру в Excel: код, название, количество, цену и сумму. Подходят товарные документы и УПД.",
+            text="Выберите один или несколько PDF. Программа перенесёт номенклатуру в Excel: код, название, количество, цену и сумму. Подходят товарные документы и УПД.",
             bg=BG,
             fg=INK,
             font=("Helvetica", 13),
@@ -97,7 +107,7 @@ class App(tk.Tk):
 
         self.status = tk.Label(
             wrap,
-            text="Можно перетащить PDF на значок программы.",
+            text="Можно выбрать несколько файлов или перетащить их на значок программы.",
             bg=BG,
             fg=MUTED,
             font=("Helvetica", 12),
@@ -127,7 +137,8 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         if initial:
-            self.after(200, lambda: self.convert(Path(initial)))
+            files = [Path(path) for path in initial]
+            self.after(200, lambda: self.convert(files))
 
     def _apply_icon(self) -> None:
         self._logo_img = None
@@ -153,10 +164,9 @@ class App(tk.Tk):
             self.open_btn.unbind("<Button-1>")
 
     def _opened(self, *paths: str) -> None:
-        for path in paths:
-            if str(path).lower().endswith(".pdf"):
-                self.convert(Path(path))
-                return
+        files = [Path(path) for path in paths if str(path).lower().endswith(".pdf")]
+        if files:
+            self.convert(files)
 
     def set_status(self, text: str) -> None:
         self.status.configure(text=text, fg=INK)
@@ -169,46 +179,68 @@ class App(tk.Tk):
     def pick_pdf(self) -> None:
         if self._busy:
             return
-        path = filedialog.askopenfilename(
+        paths = filedialog.askopenfilenames(
             title="Выберите PDF",
             filetypes=[("PDF", "*.pdf"), ("Все файлы", "*.*")],
         )
-        if path:
-            self.convert(Path(path))
+        if paths:
+            self.convert([Path(path) for path in paths])
 
-    def convert(self, pdf: Path) -> None:
+    def convert(self, pdfs: list[Path]) -> None:
         if self._busy:
             return
-        if not pdf.exists():
-            messagebox.showerror("Файл не найден", str(pdf))
+        missing = [pdf for pdf in pdfs if not pdf.exists()]
+        if missing:
+            messagebox.showerror("Файл не найден", "\n".join(str(pdf) for pdf in missing))
             return
-        default = pdf.with_name(f"Номенклатура_{pdf.stem}.xlsx")
-        dest = filedialog.asksaveasfilename(
-            title="Куда сохранить Excel",
-            defaultextension=".xlsx",
-            initialfile=default.name,
-            initialdir=str(pdf.parent),
-            filetypes=[("Excel", "*.xlsx")],
-        )
-        if not dest:
-            return
+        if len(pdfs) == 1:
+            pdf = pdfs[0]
+            default = pdf.with_name(f"Номенклатура_{pdf.stem}.xlsx")
+            dest = filedialog.asksaveasfilename(
+                title="Куда сохранить Excel",
+                defaultextension=".xlsx",
+                initialfile=default.name,
+                initialdir=str(pdf.parent),
+                filetypes=[("Excel", "*.xlsx")],
+            )
+            if not dest:
+                return
+            targets = [(pdf, Path(dest))]
+        else:
+            folder = filedialog.askdirectory(
+                title="Куда сохранить Excel",
+                initialdir=str(pdfs[0].parent),
+            )
+            if not folder:
+                return
+            used: set[Path] = set()
+            targets = [(pdf, _output_path(Path(folder), pdf.stem, used)) for pdf in pdfs]
         self._busy = True
         self.pick.configure(fg="#cbd5e1", cursor="arrow")
         self.pick.unbind("<Button-1>")
         self._set_open_enabled(False)
-        self.set_status("Читаю документ… распознавание скана занимает около минуты.")
+        self.set_status("Читаю документы… распознавание скана занимает около минуты на файл.")
         self.set_progress(0, 1)
 
         def work() -> None:
-            try:
-                def progress(done: int, total: int, message: str) -> None:
-                    self.after(0, lambda: self._on_progress(done, total, message))
+            done = []
+            errors = []
+            total_files = len(targets)
+            for index, (pdf, dest) in enumerate(targets):
+                def progress(page_done: int, page_total: int, message: str, index=index, pdf=pdf) -> None:
+                    prefix = f"Файл {index + 1} из {total_files}: {pdf.name}. "
+                    frac = index / total_files
+                    if page_total:
+                        frac += min(page_done, page_total) / page_total / total_files
+                    self.after(0, lambda f=frac, m=prefix + message: self._on_progress_frac(f, m))
 
-                result = convert_pdf(pdf, progress=progress)
-                write_xlsx(result, dest)
-                self.after(0, lambda: self._on_done(Path(dest), result))
-            except Exception as exc:
-                self.after(0, lambda: self._on_fail(exc))
+                try:
+                    result = convert_pdf(pdf, progress=progress)
+                    write_xlsx(result, dest)
+                    done.append((result, dest))
+                except Exception as exc:
+                    errors.append((pdf, exc))
+            self.after(0, lambda: self._on_batch_done(done, errors))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -216,26 +248,44 @@ class App(tk.Tk):
         self.set_status(message)
         self.set_progress(done, total)
 
-    def _on_done(self, path: Path, result) -> None:
+    def _on_progress_frac(self, frac: float, message: str) -> None:
+        self.set_status(message)
+        width = self.bar.winfo_width() or 500
+        self.bar.coords(self._bar_fill, 0, 0, int(width * max(0.0, min(frac, 1.0))), 8)
+
+    def _unlock(self) -> None:
         self._busy = False
         self.pick.configure(fg="white", cursor="hand2")
         self.pick.bind("<Button-1>", lambda _event: self.pick_pdf())
-        self._last_file = path
-        self._set_open_enabled(True)
-        self.set_progress(1, 1)
+
+    def _summary(self, result, path: Path) -> str:
         line = f"Готово: {len(result.items)} поз., сумма {_money(result.total)} ₽"
         if result.invoice_no:
             line = f"Документ № {result.invoice_no}. " + line
         if result.warnings:
             line += "\n" + " ".join(result.warnings)
-        self.set_status(line + f"\n{path}")
+        return line + f"\n{path}"
 
-    def _on_fail(self, exc: Exception) -> None:
-        self._busy = False
-        self.pick.configure(fg="white", cursor="hand2")
-        self.pick.bind("<Button-1>", lambda _event: self.pick_pdf())
-        self.set_status("Не получилось прочитать этот PDF.")
-        messagebox.showerror("Не удалось конвертировать", str(exc))
+    def _on_batch_done(self, done: list, errors: list) -> None:
+        self._unlock()
+        self.set_progress(1, 1)
+        if done:
+            self._last_file = done[0][1]
+            self._set_open_enabled(True)
+        if len(done) == 1 and not errors:
+            self.set_status(self._summary(done[0][0], done[0][1]))
+            return
+        lines = [f"Готово файлов: {len(done)}."]
+        for result, path in done:
+            lines.append(f"{path.name}: {len(result.items)} поз., {_money(result.total)} ₽")
+        if errors:
+            lines.append("Не прочитаны: " + ", ".join(pdf.name for pdf, _exc in errors))
+        self.set_status("\n".join(lines))
+        if errors:
+            messagebox.showerror(
+                "Не все файлы прочитаны",
+                "\n".join(f"{pdf.name}: {exc}" for pdf, exc in errors),
+            )
 
     def reveal(self) -> None:
         if not self._last_file or not self._last_file.exists():
@@ -248,7 +298,7 @@ class App(tk.Tk):
 
 
 def main() -> None:
-    initial = next((a for a in sys.argv[1:] if a.lower().endswith(".pdf")), None)
+    initial = [a for a in sys.argv[1:] if a.lower().endswith(".pdf")]
     App(initial).mainloop()
 
 
