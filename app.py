@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
+import certifi
 from PIL import Image, ImageTk
 
 from convert import convert_pdf, write_xlsx
@@ -42,6 +44,15 @@ def _clickable(parent: tk.Misc, text: str, command, bg: str, fg: str, font: tupl
     label = tk.Label(parent, text=text, bg=bg, fg=fg, font=font, padx=16, pady=8, cursor="hand2")
     label.bind("<Button-1>", lambda _event: command())
     return label
+
+
+def _urlopen(url: str, accept: str | None = None):
+    headers = {"User-Agent": "PDF2Excel"}
+    if accept:
+        headers["Accept"] = accept
+    request = urllib.request.Request(url, headers=headers)
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urllib.request.urlopen(request, timeout=120, context=context)
 
 
 def _version_key(value: str) -> tuple[int, ...]:
@@ -335,11 +346,10 @@ class App(tk.Tk):
 
     def _fetch_release(self, install: bool) -> None:
         try:
-            request = urllib.request.Request(
+            with _urlopen(
                 f"https://api.github.com/repos/{REPO}/releases/latest",
-                headers={"User-Agent": "PDF2Excel", "Accept": "application/vnd.github+json"},
-            )
-            with urllib.request.urlopen(request, timeout=20) as response:
+                accept="application/vnd.github+json",
+            ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except Exception:
             if install:
@@ -379,7 +389,8 @@ class App(tk.Tk):
         def work() -> None:
             try:
                 archive = Path(tempfile.gettempdir()) / "PDF2Excel-update.zip"
-                urllib.request.urlretrieve(url, archive)
+                with _urlopen(url) as response, archive.open("wb") as handle:
+                    handle.write(response.read())
                 folder = Path(tempfile.mkdtemp(prefix="pdf2excel-"))
                 with zipfile.ZipFile(archive) as bundle:
                     bundle.extractall(folder)
@@ -391,10 +402,10 @@ class App(tk.Tk):
                             "$ErrorActionPreference = 'SilentlyContinue'",
                             f"$src = '{_ps_quote(folder)}'",
                             f"$dst = '{_ps_quote(dest)}'",
-                            "$exe = Join-Path $dst 'PDF2Excel.exe'",
+                            "$exe = Join-Path $dst 'KT Digital.exe'",
                             "for ($i = 0; $i -lt 40; $i++) {",
                             "    try {",
-                            "        Copy-Item -LiteralPath (Join-Path $src 'PDF2Excel.exe') -Destination $exe -Force -ErrorAction Stop",
+                            "        Copy-Item -LiteralPath (Join-Path $src 'KT Digital.exe') -Destination $exe -Force -ErrorAction Stop",
                             "        break",
                             "    } catch { Start-Sleep -Seconds 1 }",
                             "}",

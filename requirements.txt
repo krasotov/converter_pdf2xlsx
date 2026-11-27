@@ -1,4 +1,5 @@
 pymupdf
 openpyxl
 Pillow
+certifi
 ocrmac; sys_platform == "darwin"
