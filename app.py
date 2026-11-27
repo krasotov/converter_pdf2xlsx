@@ -6,8 +6,11 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox
+
+from PIL import Image, ImageTk
 
 from convert import convert_pdf, write_xlsx
 
@@ -22,6 +25,12 @@ def _money(value) -> str:
     return text.replace(",", " ").replace(".", ",")
 
 
+def _asset(name: str) -> Path:
+    meipass = getattr(sys, "_MEIPASS", None)
+    root = Path(meipass) if meipass else Path(__file__).resolve().parent
+    return root / name
+
+
 def _clickable(parent: tk.Misc, text: str, command, bg: str, fg: str, font: tuple) -> tk.Label:
     label = tk.Label(parent, text=text, bg=bg, fg=fg, font=font, padx=16, pady=8, cursor="hand2")
     label.bind("<Button-1>", lambda _event: command())
@@ -32,32 +41,39 @@ class App(tk.Tk):
     def __init__(self, initial: str | None = None) -> None:
         super().__init__()
         self.title("PDF → Excel")
-        self.geometry("580x390")
-        self.minsize(540, 360)
+        self.geometry("580x460")
+        self.minsize(540, 420)
         self.configure(bg=BG)
         self._busy = False
         self._last_file: Path | None = None
+        self._apply_icon()
 
         footer = tk.Label(
             self,
             text="Разработано KT Digital",
             bg=BG,
-            fg=INK,
-            font=("Helvetica", 12),
+            fg=NAVY,
+            font=("Helvetica", 12, "underline"),
+            cursor="hand2",
         )
         footer.pack(side="bottom", pady=(0, 14))
+        footer.bind("<Button-1>", lambda _event: webbrowser.open("https://ktdigital.ru"))
 
         wrap = tk.Frame(self, bg=BG, padx=28, pady=22)
         wrap.pack(fill="both", expand=True)
 
+        head = tk.Frame(wrap, bg=BG)
+        head.pack(fill="x")
+        if self._logo_img is not None:
+            tk.Label(head, image=self._logo_img, bg=BG).pack(side="left", padx=(0, 14))
         tk.Label(
-            wrap,
+            head,
             text="PDF → Excel",
             bg=BG,
             fg=NAVY,
             font=("Helvetica", 22, "bold"),
             anchor="w",
-        ).pack(fill="x")
+        ).pack(side="left")
         tk.Label(
             wrap,
             text="Выберите PDF. Программа перенесёт номенклатуру в Excel: код, название, количество, цену и сумму. Подходят товарные документы и УПД.",
@@ -112,6 +128,21 @@ class App(tk.Tk):
             pass
         if initial:
             self.after(200, lambda: self.convert(Path(initial)))
+
+    def _apply_icon(self) -> None:
+        self._logo_img = None
+        png = _asset("icon.png")
+        if png.is_file():
+            image = Image.open(png).convert("RGBA")
+            self._icon_img = ImageTk.PhotoImage(image.resize((128, 128), Image.Resampling.LANCZOS))
+            self._logo_img = ImageTk.PhotoImage(image.resize((64, 64), Image.Resampling.LANCZOS))
+            self.iconphoto(True, self._icon_img)
+        ico = _asset("icon.ico")
+        if sys.platform == "win32" and ico.is_file():
+            try:
+                self.iconbitmap(str(ico))
+            except tk.TclError:
+                pass
 
     def _set_open_enabled(self, enabled: bool) -> None:
         if enabled:

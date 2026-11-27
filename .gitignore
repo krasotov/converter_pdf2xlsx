@@ -5,3 +5,5 @@ build/
 dist/
 *.spec
 .DS_Store
+icon.icns
+icon.iconset/

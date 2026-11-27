@@ -198,6 +198,31 @@ def _row_from_block(block: list[list[dict]], layout: dict, rows: list[UpdRow]) -
     )
 
 
+def _is_page_chrome(line: list[dict]) -> bool:
+    text = " ".join(w["t"] for w in line).lower().replace("ё", "е")
+    if "счет-фактура" in text or "приложение" in text:
+        return True
+    if "универсальный" in text and "передаточ" in text:
+        return True
+    return text.startswith("продавец") or text.startswith("покупатель")
+
+
+def _absorb_line(
+    line: list[dict],
+    layout: dict,
+    pending: list[list[dict]] | None,
+    rows: list[UpdRow],
+) -> list[list[dict]] | None:
+    code_right = layout["bounds"].get("А", (0.0, 0.1))[1]
+    if any(_is_code(w["t"]) and w["cx"] < code_right for w in line):
+        if pending:
+            rows.append(_row_from_block(pending, layout, rows))
+        return [line]
+    if pending is not None and not _is_page_chrome(line):
+        pending.append(line)
+    return pending
+
+
 def parse_upd(doc: pymupdf.Document) -> Result:
     rows: list[UpdRow] = []
     meta = {"no": "", "date": "", "seller": "", "buyer": "", "seller_inn": "", "buyer_inn": ""}
@@ -228,22 +253,17 @@ def parse_upd(doc: pymupdf.Document) -> Result:
                 "name_right": (pos.get("1б", 0.30) + pos.get("2", 0.33)) / 2,
                 "name_left": pos.get("1", 0.1) + 0.012,
             }
+            if pending is not None:
+                for line in lines[:start]:
+                    pending = _absorb_line(line, layout, pending, rows)
             data_from = start + 1
         elif layout is None:
             continue
         else:
             data_from = 0
         data_to = end if end is not None else len(lines)
-        if data_to <= data_from:
-            continue
-        code_right = layout["bounds"].get("А", (0.0, 0.1))[1]
         for line in lines[data_from:data_to]:
-            if any(_is_code(w["t"]) and w["cx"] < code_right for w in line):
-                if pending:
-                    rows.append(_row_from_block(pending, layout, rows))
-                pending = [line]
-            elif pending is not None:
-                pending.append(line)
+            pending = _absorb_line(line, layout, pending, rows)
         if end is not None:
             if pending:
                 rows.append(_row_from_block(pending, layout, rows))
