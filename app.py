@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
+import urllib.request
 import webbrowser
+import zipfile
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from PIL import Image, ImageTk
 
 from convert import convert_pdf, write_xlsx
+from version import APP_VERSION
+
+REPO = "krasotov/converter_pdf2xlsx"
 
 BG = "#f4f6f8"
 INK = "#1e293b"
@@ -37,6 +44,23 @@ def _clickable(parent: tk.Misc, text: str, command, bg: str, fg: str, font: tupl
     return label
 
 
+def _version_key(value: str) -> tuple[int, ...]:
+    numbers = []
+    for piece in value.lstrip("vV").split("."):
+        digits = ""
+        for ch in piece:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        numbers.append(int(digits or "0"))
+    return tuple(numbers)
+
+
+def _ps_quote(path: Path) -> str:
+    return str(path).replace("'", "''")
+
+
 def _output_path(folder: Path, stem: str, used: set[Path]) -> Path:
     path = folder / f"Номенклатура_{stem}.xlsx"
     number = 2
@@ -58,16 +82,29 @@ class App(tk.Tk):
         self._last_file: Path | None = None
         self._apply_icon()
 
+        bottom = tk.Frame(self, bg=BG)
+        bottom.pack(side="bottom", fill="x", padx=28, pady=(0, 14))
+        self.update_btn = tk.Label(
+            bottom,
+            text="Обновить",
+            bg=BG,
+            fg=NAVY,
+            font=("Helvetica", 12, "underline"),
+            cursor="hand2",
+        )
+        self.update_btn.pack(side="left")
+        self.update_btn.bind("<Button-1>", lambda _event: self.check_update())
         footer = tk.Label(
-            self,
+            bottom,
             text="Разработано KT Digital",
             bg=BG,
             fg=NAVY,
             font=("Helvetica", 12, "underline"),
             cursor="hand2",
         )
-        footer.pack(side="bottom", pady=(0, 14))
+        footer.pack(side="right")
         footer.bind("<Button-1>", lambda _event: webbrowser.open("https://ktdigital.ru"))
+        self.after(800, self._peek_update)
 
         wrap = tk.Frame(self, bg=BG, padx=28, pady=22)
         wrap.pack(fill="both", expand=True)
@@ -286,6 +323,104 @@ class App(tk.Tk):
                 "Не все файлы прочитаны",
                 "\n".join(f"{pdf.name}: {exc}" for pdf, exc in errors),
             )
+
+    def _peek_update(self) -> None:
+        threading.Thread(target=lambda: self._fetch_release(install=False), daemon=True).start()
+
+    def check_update(self) -> None:
+        if self._busy:
+            return
+        self.set_status("Проверяю обновление…")
+        threading.Thread(target=lambda: self._fetch_release(install=True), daemon=True).start()
+
+    def _fetch_release(self, install: bool) -> None:
+        try:
+            request = urllib.request.Request(
+                f"https://api.github.com/repos/{REPO}/releases/latest",
+                headers={"User-Agent": "PDF2Excel", "Accept": "application/vnd.github+json"},
+            )
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            if install:
+                self.after(0, lambda: self.set_status("Не удалось проверить обновление."))
+            return
+        remote = str(payload.get("tag_name", "")).lstrip("vV")
+        if not remote or _version_key(remote) <= _version_key(APP_VERSION):
+            if install:
+                self.after(
+                    0,
+                    lambda: self.set_status(f"Установлена последняя версия {APP_VERSION}."),
+                )
+            return
+        asset = next(
+            (item for item in payload.get("assets", []) if item.get("name") == "PDF2Excel.zip"),
+            None,
+        )
+        page = payload.get("html_url") or f"https://github.com/{REPO}/releases/latest"
+
+        def offer() -> None:
+            if not install:
+                self.update_btn.configure(text=f"Обновить до {remote}")
+                if not self._busy:
+                    self.set_status(f"Доступна версия {remote}. Нажмите «Обновить до {remote}».")
+                return
+            if sys.platform == "win32" and asset:
+                self._download_update(asset["browser_download_url"], remote)
+            else:
+                webbrowser.open(page)
+                self.set_status(f"Доступна версия {remote}. Открыта страница загрузки.")
+
+        self.after(0, offer)
+
+    def _download_update(self, url: str, remote: str) -> None:
+        self.set_status(f"Скачиваю версию {remote}…")
+
+        def work() -> None:
+            try:
+                archive = Path(tempfile.gettempdir()) / "PDF2Excel-update.zip"
+                urllib.request.urlretrieve(url, archive)
+                folder = Path(tempfile.mkdtemp(prefix="pdf2excel-"))
+                with zipfile.ZipFile(archive) as bundle:
+                    bundle.extractall(folder)
+                dest = Path(sys.executable).resolve().parent
+                script = folder / "update.ps1"
+                script.write_text(
+                    "\n".join(
+                        [
+                            "$ErrorActionPreference = 'SilentlyContinue'",
+                            f"$src = '{_ps_quote(folder)}'",
+                            f"$dst = '{_ps_quote(dest)}'",
+                            "$exe = Join-Path $dst 'PDF2Excel.exe'",
+                            "for ($i = 0; $i -lt 40; $i++) {",
+                            "    try {",
+                            "        Copy-Item -LiteralPath (Join-Path $src 'PDF2Excel.exe') -Destination $exe -Force -ErrorAction Stop",
+                            "        break",
+                            "    } catch { Start-Sleep -Seconds 1 }",
+                            "}",
+                            "Copy-Item -LiteralPath (Join-Path $src '*') -Destination $dst -Recurse -Force",
+                            "Start-Process -FilePath $exe",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                subprocess.Popen(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-WindowStyle",
+                        "Hidden",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                    ]
+                )
+                self.after(0, self.destroy)
+            except Exception as exc:
+                self.after(0, lambda: self.set_status(f"Не удалось скачать обновление. {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
 
     def reveal(self) -> None:
         if not self._last_file or not self._last_file.exists():

@@ -427,13 +427,23 @@ def convert_pdf(path: str | Path, progress=None) -> Result:
     path = Path(path)
     doc = pymupdf.open(path)
     sample = "\n".join(page.get_text("text") for page in doc)
-    if "Универсальный" in sample and "передаточн" in sample.lower():
+    folded = sample.lower().replace("ё", "е")
+    if "универсальный" in folded and "передаточн" in folded:
         from upd import parse_upd
 
         try:
             if progress:
                 progress(0, 1, "Читаю УПД")
             return parse_upd(doc)
+        finally:
+            doc.close()
+    if "счет на оплату" in folded:
+        from bill import parse_bill
+
+        try:
+            if progress:
+                progress(0, 1, "Читаю документ")
+            return parse_bill(doc)
         finally:
             doc.close()
     rows: list[dict] = []

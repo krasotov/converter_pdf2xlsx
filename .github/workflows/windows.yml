@@ -36,7 +36,7 @@ jobs:
           Set-Content -Path tesspath.txt -Value $tess -Encoding ascii
 
       - name: Build exe
-        run: pyinstaller --noconfirm --windowed --name PDF2Excel --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --hidden-import upd --collect-submodules pymupdf app.py
+        run: pyinstaller --noconfirm --windowed --name PDF2Excel --icon icon.ico --add-data "icon.png;." --add-data "icon.ico;." --hidden-import upd --hidden-import bill --hidden-import version --collect-submodules pymupdf app.py
 
       - name: Bundle Tesseract next to the exe
         shell: pwsh
@@ -50,5 +50,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view v1.0.0 || gh release create v1.0.0 --title "Windows" --notes "PDF2Excel для Windows. Распакуйте архив и запустите PDF2Excel.exe."
-          gh release upload v1.0.0 PDF2Excel.zip --clobber
+          VERSION=$(python -c "import version; print(version.APP_VERSION)")
+          gh release view "v$VERSION" || gh release create "v$VERSION" --title "PDF2Excel $VERSION" --notes "PDF2Excel для Windows. Распакуйте архив и запустите PDF2Excel.exe. В программе кнопка «Обновить» ставит следующую сборку."
+          gh release upload "v$VERSION" PDF2Excel.zip --clobber
